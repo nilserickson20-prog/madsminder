@@ -1,0 +1,60 @@
+name: Deploy to Fly (no Depot)
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  FLY_APP: madsminder            # <-- set your app name here
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show repo tree
+        run: |
+          pwd
+          ls -la
+
+      - name: Setup Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      # Authenticate the GitHub runner's Docker client to Fly's registry
+      - name: Flyctl auth docker
+        run: flyctl auth docker
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Optional: ensure Buildx is available
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build the image locally on the runner and push to Fly registry
+      - name: Build & push image to Fly registry
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: registry.fly.io/${{ env.FLY_APP }}:${{ github.sha }}
+
+      # Deploy the image we just pushed (no remote build / no Depot)
+      - name: Deploy image
+        run: |
+          flyctl deploy \
+            --app "${{ env.FLY_APP }}" \
+            --image "registry.fly.io/${{ env.FLY_APP }}:${{ github.sha }}" \
+            --verbose
+        env:
+            FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      # Print status & last logs if something goes wrong
+      - name: Status & recent logs
+        if: failure()
+        run: |
+          flyctl status --app "${{ env.FLY_APP }}" || true
+          flyctl logs --app "${{ env.FLY_APP }}" --max-lines 200 || true
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
