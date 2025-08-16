@@ -1,0 +1,124 @@
+name: Fix & Deploy to Fly (Self-healing)
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Fly app name (must be globally unique)"
+        required: true
+        default: "madsminder"
+      region:
+        description: "Fly region code (e.g., iad, lhr, fra)"
+        required: true
+        default: "iad"
+      volume_size_gb:
+        description: "Volume size in GB"
+        required: true
+        default: "1"
+
+jobs:
+  fix-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show repo tree
+        run: |
+          pwd
+          ls -la
+
+      - name: Setup Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      - name: Ensure app exists (or create it)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          APP="${{ inputs.app }}"
+          ORG="${{ secrets.FLY_ORG }}"
+          echo "Ensuring app '$APP' exists..."
+          if flyctl apps show "$APP" >/dev/null 2>&1; then
+            echo "App exists."
+          else
+            echo "App not found. Creating..."
+            if [ -n "$ORG" ]; then
+              flyctl apps create "$APP" --org "$ORG"
+            else
+              flyctl apps create "$APP"
+            fi
+          fi
+
+      - name: Sync fly.toml app name
+        run: |
+          APP="${{ inputs.app }}"
+          if [ -f fly.toml ]; then
+            # Replace or insert app = "..."
+            if grep -q '^app = ' fly.toml; then
+              sed -i 's/^app = .*$/app = "'"$APP"'"/' fly.toml
+            else
+              sed -i '1s;^;app = "'"$APP"'"\n;' fly.toml
+            fi
+            echo "fly.toml now:"
+            head -n 20 fly.toml
+          else
+            echo "ERROR: fly.toml not found at repo root"; exit 1
+          fi
+
+      - name: Create data volume if missing
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          APP="${{ inputs.app }}"
+          REGION="${{ inputs.region }}"
+          SIZE="${{ inputs.volume_size_gb }}"
+          echo "Checking for existing 'data' volume..."
+          if flyctl volumes list --app "$APP" | grep -qE "^\s*data\s"; then
+            echo "Volume 'data' already exists."
+          else
+            echo "Creating volume 'data' in region '$REGION' size ${SIZE}GB..."
+            flyctl volumes create data --app "$APP" --region "$REGION" --size "$SIZE" -y
+          fi
+
+      - name: Import secrets to Fly (only the ones you set in GitHub)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          ANNOUNCE_CHANNEL_ID: ${{ secrets.ANNOUNCE_CHANNEL_ID }}
+          TZ: ${{ secrets.TZ }}
+          THREAT_GRACE_MINUTES: ${{ secrets.THREAT_GRACE_MINUTES }}
+          THREAT_COOLDOWN_MINUTES: ${{ secrets.THREAT_COOLDOWN_MINUTES }}
+        run: |
+          set -e
+          APP="${{ inputs.app }}"
+          TMP=".secrets.env"
+          : > "$TMP"
+          [ -n "$DISCORD_TOKEN" ] && echo "DISCORD_TOKEN=$DISCORD_TOKEN" >> "$TMP"
+          [ -n "$ANNOUNCE_CHANNEL_ID" ] && echo "ANNOUNCE_CHANNEL_ID=$ANNOUNCE_CHANNEL_ID" >> "$TMP"
+          [ -n "$TZ" ] && echo "TZ=$TZ" >> "$TMP"
+          [ -n "$THREAT_GRACE_MINUTES" ] && echo "THREAT_GRACE_MINUTES=$THREAT_GRACE_MINUTES" >> "$TMP"
+          [ -n "$THREAT_COOLDOWN_MINUTES" ] && echo "THREAT_COOLDOWN_MINUTES=$THREAT_COOLDOWN_MINUTES" >> "$TMP"
+          if [ -s "$TMP" ]; then
+            echo "Importing secrets to Fly app '$APP'..."
+            flyctl secrets import --app "$APP" < "$TMP"
+          else
+            echo "No secrets provided in GitHub; skipping import."
+          fi
+
+      - name: Deploy (verbose, remote-only)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          flyctl version
+          flyctl deploy --remote-only --verbose --app "${{ inputs.app }}"
+
+      - name: Show status & recent logs (helps if app crashes)
+        if: always()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl status --app "${{ inputs.app }}" || true
+          echo "---- Recent Logs ----"
+          flyctl logs --app "${{ inputs.app }}" --max-lines 200 || true
