@@ -1,0 +1,39 @@
+name: Provision Fly Volume
+on:
+  workflow_dispatch:
+    inputs:
+      app:
+        description: "Fly app name (must match fly.toml)"
+        required: true
+        default: "madsminder"
+      region:
+        description: "Fly region for the volume"
+        required: true
+        default: "iad"
+      size:
+        description: "Volume size in GB"
+        required: true
+        default: "1"
+
+jobs:
+  create-volume:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      - name: Create volume (idempotent)
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -e
+          echo "Creating volume 'data' for app '${{ inputs.app }}' in region '${{ inputs.region }}'..."
+          # Try to create, ignore if it already exists
+          flyctl volumes create data \
+            --app "${{ inputs.app }}" \
+            --region "${{ inputs.region }}" \
+            --size "${{ inputs.size }}" -y || echo "Volume may already exist; continuing."
+          echo "Done."
