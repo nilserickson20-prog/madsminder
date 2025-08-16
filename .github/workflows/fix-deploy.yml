@@ -9,7 +9,7 @@ on:
       region:
         description: "Fly region code (e.g., iad, lhr, fra)"
         required: true
-        default: "iad"
+        default: "mia"
       volume_size_gb:
         description: "Volume size in GB"
         required: true
