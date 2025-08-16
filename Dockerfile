@@ -3,7 +3,7 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
 
-# Install TLS CA certs (required for Discord HTTPS)
+# TLS CA certs for HTTPS to Discord
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
