@@ -1,35 +1,38 @@
 import os, asyncio, datetime as dt, random
 import aiosqlite
 import discord
-
-# ... existing imports ...
-
-TOKEN = os.getenv("DISCORD_TOKEN")
-if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is not set. Add it as a Fly secret on your app.")
-
-# (rest of config)
-
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from zoneinfo import ZoneInfo
 
-# ---------- Config via env ----------
+# ----- Robust env parsing -----
+def getenv_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    try:
+        return int(v) if v not in (None, "", "null", "None") else default
+    except Exception:
+        return default
+
 TOKEN = os.getenv("DISCORD_TOKEN")
-ANNOUNCE_CHANNEL_ID = int(os.getenv("ANNOUNCE_CHANNEL_ID", "0"))     # optional daily prompt channel
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is not set. Add it as a Fly secret on your app (value = the raw token string).")
+
+ANNOUNCE_CHANNEL_ID = getenv_int("ANNOUNCE_CHANNEL_ID", 0)   # safe even if secret exists but blank
 DB_PATH = os.getenv("DB_PATH", "/data/madsminder.db")
 TZ = os.getenv("TZ", "America/New_York")
-# Start threatening nudges this long after a task is created (default 6 hours = 360 mins)
-THREAT_GRACE_MINUTES = int(os.getenv("THREAT_GRACE_MINUTES", "360"))
-# Minimum minutes between threats on the same task (anti-spam)
-THREAT_COOLDOWN_MINUTES = int(os.getenv("THREAT_COOLDOWN_MINUTES", "180"))
+THREAT_GRACE_MINUTES = getenv_int("THREAT_GRACE_MINUTES", 360)
+THREAT_COOLDOWN_MINUTES = getenv_int("THREAT_COOLDOWN_MINUTES", 180)
 
 INTENTS = discord.Intents.default()
 INTENTS.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=INTENTS)
+
+print(f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
+      f"GRACE={THREAT_GRACE_MINUTES} COOLDOWN={THREAT_COOLDOWN_MINUTES}")
+
 
 # ---------- Phrase bank ----------
 LINES = {
