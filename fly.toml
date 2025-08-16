@@ -1,0 +1,15 @@
+app = "madsminder-yourname"   # <- change to your unique Fly app name
+primary_region = "iad"
+
+[env]
+  DB_PATH = "/data/madsminder.db"
+  TZ = "America/New_York"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
+
+[[mounts]]
+  source = "data"
+  destination = "/data"
