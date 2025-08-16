@@ -196,7 +196,6 @@ async def addtask(interaction: discord.Interaction, text: str):
     await interaction.response.defer(ephemeral=True)
     task_msg = await interaction.channel.send(
         f"**Task for {interaction.user.display_name} ({today_iso()})**\n• {text}\n\n"
-        f"Mark complete by reacting with ✅ to this message."
     )
     conn = await get_db()
     await conn.execute("""
