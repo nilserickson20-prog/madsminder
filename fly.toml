@@ -1,5 +1,5 @@
 app = "madsminder"   # <- change to your unique Fly app name
-primary_region = "iad"
+primary_region = "mia"
 
 [env]
   DB_PATH = "/data/madsminder.db"
