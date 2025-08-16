@@ -1,6 +1,15 @@
 import os, asyncio, datetime as dt, random
 import aiosqlite
 import discord
+
+# ... existing imports ...
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    raise RuntimeError("DISCORD_TOKEN is not set. Add it as a Fly secret on your app.")
+
+# (rest of config)
+
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
