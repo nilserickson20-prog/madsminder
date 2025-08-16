@@ -1,4 +1,4 @@
-app = "madsminder-yourname"   # <- change to your unique Fly app name
+app = "madsminder"   # <- change to your unique Fly app name
 primary_region = "iad"
 
 [env]
