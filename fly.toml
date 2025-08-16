@@ -1,16 +1,16 @@
-app = "madsminder"             # your app name
-primary_region = "mia"         # the region where your data volume lives
+app = "madsminder"             # <-- set to your Fly app name
+primary_region = "mia"         # <-- set to the region where your volume lives
 
 [env]
   DB_PATH = "/data/madsminder.db"
   TZ = "America/New_York"
 
 [experimental]
-  auto_stop_machines = false   # <- keep worker running
-  auto_start_machines = true   # <- start it automatically
+  auto_stop_machines = false   # keep worker running (no autosuspend)
+  auto_start_machines = true
 
 [processes]
-  app = "python bot.py"        # <- explicitly declare the long-running process
+  app = "python bot.py"        # explicit long-running worker
 
 [[vm]]
   cpu_kind = "shared"
