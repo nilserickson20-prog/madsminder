@@ -258,7 +258,6 @@ async def addtask(interaction: discord.Interaction, text: str):
     await interaction.response.defer(ephemeral=True)
     task_msg = await interaction.channel.send(
         f"**Task for {interaction.user.display_name} ({today_iso()})**\n• {text}\n\n"
-        f"Mark complete by reacting with ✅ to this message."
     )
     conn = await get_db()
     await conn.execute("""
@@ -283,7 +282,6 @@ async def taskby(interaction: discord.Interaction, days: int, text: str):
     await interaction.response.defer(ephemeral=True)
     task_msg = await interaction.channel.send(
         f"**Task for {interaction.user.display_name}** — due within {days} day(s)\n• {text}\n\n"
-        f"React with ✅ when complete."
     )
     tz = ZoneInfo(TZ)
     now_local = dt.datetime.now(tz)
@@ -317,7 +315,6 @@ async def taskon(interaction: discord.Interaction, date: str, text: str):
     await interaction.response.defer(ephemeral=True)
     task_msg = await interaction.channel.send(
         f"**Task for {interaction.user.display_name}** — due by end of {date}\n• {text}\n\n"
-        f"React with ✅ when complete."
     )
     due_at_utc = end_of_day_utc(due_date, TZ)
 
