@@ -1,4 +1,6 @@
 import os, random, signal, datetime as dt, asyncio
+from pathlib import Path
+
 import aiosqlite
 import discord
 from discord.ext import commands
@@ -39,8 +41,12 @@ THREAT_GRACE_MINUTES = getenv_int("THREAT_GRACE_MINUTES", 360)   # start nudging
 THREAT_COOLDOWN_MINUTES = getenv_int("THREAT_COOLDOWN_MINUTES", 180)  # 3h between nudges
 GUILD_ID = getenv_int_or_none("GUILD_ID")  # optional for instant slash commands
 
+CELEBRATE_DIR = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")  # folder with images in the container
+CELEBRATE_THRESHOLD = getenv_int("CELEBRATE_THRESHOLD", 6)           # celebrate at 6th completed task
+
 print(f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
-      f"GRACE={THREAT_GRACE_MINUTES} COOLDOWN={THREAT_COOLDOWN_MINUTES} GUILD_ID={GUILD_ID or 'None'}")
+      f"GRACE={THREAT_GRACE_MINUTES} COOLDOWN={THREAT_COOLDOWN_MINUTES} "
+      f"GUILD_ID={GUILD_ID or 'None'} CELEBRATE_DIR={CELEBRATE_DIR} THRESH={CELEBRATE_THRESHOLD}")
 
 # -------------------- discord client --------------------
 INTENTS = discord.Intents.default()
@@ -118,6 +124,8 @@ def pick(seq): return random.choice(seq)
 # -------------------- db helpers --------------------
 async def get_db():
     conn = await aiosqlite.connect(DB_PATH)
+
+    # base tasks table
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,7 +139,39 @@ async def get_db():
             last_threat_at TEXT
         )
     """)
+    # migrations: due fields
+    cols = {row[1] for row in await (await conn.execute("PRAGMA table_info(tasks)")).fetchall()}
+    if "due_type" not in cols:
+        await conn.execute("ALTER TABLE tasks ADD COLUMN due_type TEXT")
+    if "due_at" not in cols:
+        await conn.execute("ALTER TABLE tasks ADD COLUMN due_at TEXT")
     await conn.commit()
+
+    # reminders
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS reminders(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT,
+            channel_id TEXT,
+            text TEXT,
+            remind_at TEXT,      -- UTC ISO
+            created_at TEXT,
+            sent INTEGER DEFAULT 0
+        )
+    """)
+    await conn.commit()
+
+    # celebrations: once per user/day
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS celebrations(
+            user_id TEXT,
+            task_date TEXT,
+            sent INTEGER DEFAULT 0,
+            PRIMARY KEY(user_id, task_date)
+        )
+    """)
+    await conn.commit()
+
     return conn
 
 def now_utc():
@@ -146,6 +186,24 @@ def parse_iso(s: str | None):
 
 def today_iso():
     return dt.date.today().isoformat()
+
+def to_utc(dt_local: dt.datetime) -> dt.datetime:
+    return dt_local.astimezone(dt.timezone.utc)
+
+def end_of_day_utc(date_obj: dt.date, tz_str: str) -> dt.datetime:
+    tz = ZoneInfo(tz_str)
+    local_eod = dt.datetime(
+        year=date_obj.year, month=date_obj.month, day=date_obj.day,
+        hour=23, minute=59, second=59, tzinfo=tz
+    )
+    return to_utc(local_eod)
+
+def pick_celebration_image() -> Path | None:
+    p = Path(CELEBRATE_DIR)
+    if not p.exists():
+        return None
+    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}]
+    return random.choice(files) if files else None
 
 # -------------------- command registration --------------------
 @bot.event
@@ -177,7 +235,8 @@ async def on_ready():
     scheduler = AsyncIOScheduler()
     if ANNOUNCE_CHANNEL_ID:
         scheduler.add_job(daily_prompt, CronTrigger(hour=9, minute=0, timezone=tz))
-    scheduler.add_job(threat_scan, IntervalTrigger(minutes=10, timezone=tz))
+    scheduler.add_job(threat_scan,   IntervalTrigger(minutes=10, timezone=tz))
+    scheduler.add_job(reminder_scan, IntervalTrigger(minutes=1,  timezone=tz))
     scheduler.start()
 
 # -------------------- slash commands --------------------
@@ -185,7 +244,10 @@ async def on_ready():
 async def help_cmd(interaction: discord.Interaction):
     text = (
         "**MadsMinder — Commands**\n"
-        "• `/addtask text:<your task>` — Add a task for today (react ✅ on that message when done)\n"
+        "• `/addtask text:<task>` — Add a task for today (react ✅ on that message when done)\n"
+        "• `/taskby days:<N> text:<task>` — Task due within N days (nudges start after N days)\n"
+        "• `/taskon date:<YYYY-MM-DD> text:<task>` — Task due by end of that date (nudges start after it)\n"
+        "• `/remindme hours:<N> text:<note>` — DM reminder after N hours\n"
         "• `/mytasks` — Show your tasks for today\n"
         "\nElegance over enthusiasm."
     )
@@ -196,11 +258,12 @@ async def addtask(interaction: discord.Interaction, text: str):
     await interaction.response.defer(ephemeral=True)
     task_msg = await interaction.channel.send(
         f"**Task for {interaction.user.display_name} ({today_iso()})**\n• {text}\n\n"
+        f"Mark complete by reacting with ✅ to this message."
     )
     conn = await get_db()
     await conn.execute("""
-        INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at, last_threat_at)
-        VALUES (?, ?, ?, 0, ?, ?, ?, NULL)
+        INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at, last_threat_at, due_type, due_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, NULL, NULL)
     """, (
         str(interaction.user.id),
         today_iso(),
@@ -211,6 +274,84 @@ async def addtask(interaction: discord.Interaction, text: str):
     ))
     await conn.commit(); await conn.close()
     await interaction.followup.send("Noted. I’ll be… observing.", ephemeral=True)
+
+@bot.tree.command(name="taskby", description="Add a task due within N days (threats begin after that window)")
+async def taskby(interaction: discord.Interaction, days: int, text: str):
+    if days <= 0 or days > 365:
+        await interaction.response.send_message("Days must be between 1 and 365.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    task_msg = await interaction.channel.send(
+        f"**Task for {interaction.user.display_name}** — due within {days} day(s)\n• {text}\n\n"
+        f"React with ✅ when complete."
+    )
+    tz = ZoneInfo(TZ)
+    now_local = dt.datetime.now(tz)
+    due_date_local = (now_local + dt.timedelta(days=days)).date()
+    due_at_utc = end_of_day_utc(due_date_local, TZ)
+
+    conn = await get_db()
+    await conn.execute("""
+        INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at, last_threat_at, due_type, due_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'by_days', ?)
+    """, (
+        str(interaction.user.id),
+        today_iso(),
+        text,
+        str(task_msg.id),
+        str(task_msg.channel.id),
+        now_utc().isoformat(),
+        due_at_utc.isoformat()
+    ))
+    await conn.commit(); await conn.close()
+    await interaction.followup.send("Registered. I’ll be… patient. For now.", ephemeral=True)
+
+@bot.tree.command(name="taskon", description="Add a task due by the end of a specific date (YYYY-MM-DD)")
+async def taskon(interaction: discord.Interaction, date: str, text: str):
+    try:
+        due_date = dt.date.fromisoformat(date)
+    except Exception:
+        await interaction.response.send_message("Use a date like 2025-08-30 (YYYY-MM-DD).", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    task_msg = await interaction.channel.send(
+        f"**Task for {interaction.user.display_name}** — due by end of {date}\n• {text}\n\n"
+        f"React with ✅ when complete."
+    )
+    due_at_utc = end_of_day_utc(due_date, TZ)
+
+    conn = await get_db()
+    await conn.execute("""
+        INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at, last_threat_at, due_type, due_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'on_date', ?)
+    """, (
+        str(interaction.user.id),
+        today_iso(),
+        text,
+        str(task_msg.id),
+        str(task_msg.channel.id),
+        now_utc().isoformat(),
+        due_at_utc.isoformat()
+    ))
+    await conn.commit(); await conn.close()
+    await interaction.followup.send("Understood. The deadline is… absolute.", ephemeral=True)
+
+@bot.tree.command(name="remindme", description="DM me a reminder after N hours")
+async def remindme(interaction: discord.Interaction, hours: int, text: str):
+    if hours <= 0 or hours > 24*14:
+        await interaction.response.send_message("Choose a number of hours between 1 and 336.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    now = now_utc()
+    remind_at = now + dt.timedelta(hours=hours)
+    conn = await get_db()
+    await conn.execute("""
+        INSERT INTO reminders(user_id, channel_id, text, remind_at, created_at, sent)
+        VALUES (?, ?, ?, ?, ?, 0)
+    """, (str(interaction.user.id), str(interaction.channel_id), text, remind_at.isoformat(), now.isoformat()))
+    await conn.commit(); await conn.close()
+    await interaction.followup.send(f"Noted. I’ll whisper in {hours} hour(s).", ephemeral=True)
 
 @bot.tree.command(name="mytasks", description="View all of your tasks for today")
 async def mytasks(interaction: discord.Interaction):
@@ -259,6 +400,39 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     user = await bot.fetch_user(payload.user_id)
     await channel.send(f"{user.mention} {pick(LINES['task_tick'])}")
 
+    # celebration check after mark done
+    conn2 = await get_db()
+    cur2 = await conn2.execute("""
+        SELECT COUNT(*) FROM tasks WHERE user_id=? AND task_date=? AND done=1
+    """, (str(payload.user_id), today_iso()))
+    (done_count,) = await cur2.fetchone()
+    await cur2.close()
+
+    cur3 = await conn2.execute("""
+        SELECT sent FROM celebrations WHERE user_id=? AND task_date=?
+    """, (str(payload.user_id), today_iso()))
+    row3 = await cur3.fetchone()
+    await cur3.close()
+
+    if done_count >= CELEBRATE_THRESHOLD and (not row3 or row3[0] == 0):
+        img = pick_celebration_image()
+        try:
+            if img:
+                await channel.send(
+                    content=f"{user.mention} A spree of competence. Accept this… memento.",
+                    file=discord.File(img)
+                )
+            else:
+                await channel.send(f"{user.mention} A spree of competence. Imagine confetti.")
+        except Exception:
+            pass
+        await conn2.execute("""
+            INSERT INTO celebrations(user_id, task_date, sent) VALUES(?, ?, 1)
+            ON CONFLICT(user_id, task_date) DO UPDATE SET sent=1
+        """, (str(payload.user_id), today_iso()))
+        await conn2.commit()
+    await conn2.close()
+
 # -------------------- jobs --------------------
 async def daily_prompt():
     if not ANNOUNCE_CHANNEL_ID:
@@ -270,13 +444,14 @@ async def threat_scan():
     """
     Every 10 minutes:
       - For each task not done,
-      - older than THREAT_GRACE_MINUTES since creation,
-      - not threatened within THREAT_COOLDOWN_MINUTES,
+      - If it has a due_at: threats start only after due_at,
+        else: threats start after THREAT_GRACE_MINUTES since creation,
+      - and not threatened within THREAT_COOLDOWN_MINUTES,
     reply to the original task message with an ominous nudge.
     """
     conn = await get_db()
     cur = await conn.execute("""
-        SELECT id, user_id, message_id, channel_id, created_at, last_threat_at
+        SELECT id, user_id, message_id, channel_id, created_at, last_threat_at, due_type, due_at
         FROM tasks
         WHERE done=0
     """)
@@ -284,15 +459,23 @@ async def threat_scan():
     await cur.close()
 
     now = now_utc()
-    for (tid, user_id, message_id, channel_id, created_at, last_threat_at) in rows:
+    for (tid, user_id, message_id, channel_id, created_at, last_threat_at, due_type, due_at) in rows:
         created_dt = parse_iso(created_at)
         last_dt = parse_iso(last_threat_at)
+        due_dt = parse_iso(due_at)
         if not created_dt:
             continue
-        age_min = (now - created_dt).total_seconds() / 60
+
+        ready = False
+        if due_dt is not None:
+            ready = now >= due_dt   # wait until due moment has passed
+        else:
+            age_min = (now - created_dt).total_seconds() / 60
+            ready = age_min >= THREAT_GRACE_MINUTES
+
         cooldown_ok = (last_dt is None) or ((now - last_dt).total_seconds() / 60 >= THREAT_COOLDOWN_MINUTES)
 
-        if age_min >= THREAT_GRACE_MINUTES and cooldown_ok:
+        if ready and cooldown_ok:
             try:
                 channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
                 msg = await channel.fetch_message(int(message_id))
@@ -300,9 +483,42 @@ async def threat_scan():
                 await conn.execute("UPDATE tasks SET last_threat_at=? WHERE id=?", (now.isoformat(), tid))
                 await conn.commit()
             except Exception:
-                # If the message or channel is gone, set last_threat_at to avoid log spam
                 await conn.execute("UPDATE tasks SET last_threat_at=? WHERE id=?", (now.isoformat(), tid))
                 await conn.commit()
+
+    await conn.close()
+
+async def reminder_scan():
+    """
+    Every minute: DM users for reminders that are due.
+    Falls back to posting in the original channel if DM fails.
+    """
+    conn = await get_db()
+    cur = await conn.execute("""
+        SELECT id, user_id, channel_id, text, remind_at FROM reminders
+        WHERE sent=0
+    """)
+    rows = await cur.fetchall()
+    await cur.close()
+
+    now = now_utc()
+    for (rid, user_id, channel_id, text, remind_at) in rows:
+        due = parse_iso(remind_at)
+        if not due or due > now:
+            continue
+        try:
+            user = await bot.fetch_user(int(user_id))
+            try:
+                await user.send(f"Reminder: {text}")
+            except Exception:
+                try:
+                    channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
+                    await channel.send(f"<@{user_id}> Reminder: {text}")
+                except Exception:
+                    pass
+        finally:
+            await conn.execute("UPDATE reminders SET sent=1 WHERE id=?", (rid,))
+            await conn.commit()
 
     await conn.close()
 
@@ -311,4 +527,3 @@ if __name__ == "__main__":
     print("[startup] starting discord client…")
     # bot.run blocks and manages the event loop & reconnect logic
     bot.run(TOKEN, log_handler=None)
-
