@@ -13,5 +13,6 @@ RUN pip install -r requirements.txt
 COPY . .
 ENV TZ=America/New_York
 
+COPY celebrate_images ./celebrate_images
 CMD ["python", "bot.py"]
 
