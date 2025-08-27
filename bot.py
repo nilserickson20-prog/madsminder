@@ -3,6 +3,7 @@ from pathlib import Path
 
 import aiosqlite
 import discord
+from discord import app_commands
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -38,14 +39,13 @@ DB_PATH = os.getenv("DB_PATH", "/data/madsminder.db")
 TZ = os.getenv("TZ", "America/New_York")
 ANNOUNCE_CHANNEL_ID = getenv_int("ANNOUNCE_CHANNEL_ID", 0)   # optional
 
-THREAT_GRACE_MINUTES = getenv_int("THREAT_GRACE_MINUTES", 360)        # 6h before nudges for plain tasks
-THREAT_COOLDOWN_MINUTES = getenv_int("THREAT_COOLDOWN_MINUTES", 180)  # default 3h between nudges
-MAX_THREATS_PER_TASK = getenv_int("MAX_THREATS_PER_TASK", 5)          # max nags per task
+THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)   # 6h before nudges for plain tasks
+THREAT_COOLDOWN_MINUTES   = getenv_int("THREAT_COOLDOWN_MINUTES", 180) # 3h between nudges
+MAX_THREATS_PER_TASK      = getenv_int("MAX_THREATS_PER_TASK", 5)      # cap per task
+GUILD_ID                  = getenv_int_or_none("GUILD_ID")              # instant guild sync if set
 
-GUILD_ID = getenv_int_or_none("GUILD_ID")  # optional for instant slash commands
-
-CELEBRATE_DIR = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")
-CELEBRATE_THRESHOLD = getenv_int("CELEBRATE_THRESHOLD", 6)
+CELEBRATE_DIR             = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")
+CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)        # celebrate at 6 tasks done in a day
 
 print(
     f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
@@ -169,7 +169,7 @@ async def get_db():
     """)
     await conn.commit()
 
-    # celebrations (to avoid double posting per user/day)
+    # celebrations (avoid double posting per user/day)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS celebrations(
             user_id TEXT,
@@ -248,6 +248,7 @@ async def help_cmd(interaction: discord.Interaction):
         "• `/taskon date:<YYYY-MM-DD> text:<task>`\n"
         "• `/remindme hours:<N> text:<note>`\n"
         "• `/mytasks`\n"
+        "• `/cleartasks scope:(today|open|all)`\n"
         "\nElegance over enthusiasm."
     )
     await interaction.response.send_message(text, ephemeral=True)
@@ -342,6 +343,42 @@ async def mytasks(interaction: discord.Interaction):
         await interaction.response.send_message("You’ve added no tasks today.", ephemeral=True); return
     lines = [f"{'✅' if done else '⬜️'} {i}) {text}" for i, (text, done) in enumerate(rows, 1)]
     await interaction.response.send_message("**Your tasks for today**\n" + "\n".join(lines), ephemeral=True)
+
+@bot.tree.command(name="cleartasks", description="Clear your tasks (today | open | all)")
+@app_commands.describe(scope="Which tasks to clear: today, open, or all")
+@app_commands.choices(
+    scope=[
+        app_commands.Choice(name="today", value="today"),
+        app_commands.Choice(name="open",  value="open"),
+        app_commands.Choice(name="all",   value="all"),
+    ]
+)
+async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choice[str] = None):
+    scope_val = (scope.value if scope else "today").lower()
+    uid = str(interaction.user.id)
+    conn = await get_db()
+
+    # Count first
+    if scope_val == "today":
+        cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND task_date=?", (uid, today_iso()))
+    elif scope_val == "open":
+        cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0", (uid,))
+    else:  # all
+        cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=?", (uid,))
+    (count_to_delete,) = await cur.fetchone(); await cur.close()
+
+    # Delete + tidy celebrations
+    if scope_val == "today":
+        await conn.execute("DELETE FROM tasks WHERE user_id=? AND task_date=?", (uid, today_iso()))
+        await conn.execute("DELETE FROM celebrations WHERE user_id=? AND task_date=?", (uid, today_iso()))
+    elif scope_val == "open":
+        await conn.execute("DELETE FROM tasks WHERE user_id=? AND done=0", (uid,))
+    else:
+        await conn.execute("DELETE FROM tasks WHERE user_id=?", (uid,))
+        await conn.execute("DELETE FROM celebrations WHERE user_id=?", (uid,))
+    await conn.commit(); await conn.close()
+
+    await interaction.response.send_message(f"Cleared **{count_to_delete}** task(s) ({scope_val}).", ephemeral=True)
 
 # -------------------- reactions --------------------
 @bot.event
