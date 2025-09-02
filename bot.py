@@ -247,7 +247,7 @@ async def help_cmd(interaction: discord.Interaction):
         "• `/taskby days:<N> text:<task>`\n"
         "• `/taskon date:<YYYY-MM-DD> text:<task>`\n"
         "• `/remindme hours:<N> text:<note>`\n"
-        "• `/mytasks`\n"
+        "• `/mytasks scope:(today|open|all)`\n"
         "• `/cleartasks scope:(today|open|all)`\n"
         "\nElegance over enthusiasm."
     )
@@ -331,18 +331,48 @@ async def remindme(interaction: discord.Interaction, hours: int, text: str):
     await conn.commit(); await conn.close()
     await interaction.followup.send(f"Noted. I’ll whisper in {hours} hour(s).", ephemeral=True)
 
-@bot.tree.command(name="mytasks", description="View your tasks for today")
-async def mytasks(interaction: discord.Interaction):
+@bot.tree.command(name="mytasks", description="View your tasks")
+@app_commands.describe(scope="Which tasks to show: today, open, or all")
+@app_commands.choices(
+    scope=[
+        app_commands.Choice(name="today", value="today"),
+        app_commands.Choice(name="open",  value="open"),
+        app_commands.Choice(name="all",   value="all"),
+    ]
+)
+async def mytasks(interaction: discord.Interaction, scope: app_commands.Choice[str] = None):
+    scope_val = (scope.value if scope else "today").lower()
+    uid = str(interaction.user.id)
     conn = await get_db()
-    cur = await conn.execute(
-        "SELECT task_text, done FROM tasks WHERE user_id=? AND task_date=? ORDER BY id ASC",
-        (str(interaction.user.id), today_iso())
-    )
-    rows = await cur.fetchall(); await cur.close(); await conn.close()
+
+    if scope_val == "today":
+        cur = await conn.execute(
+            "SELECT task_text, done, task_date FROM tasks WHERE user_id=? AND task_date=? ORDER BY id ASC",
+            (uid, today_iso())
+        )
+    elif scope_val == "open":
+        cur = await conn.execute(
+            "SELECT task_text, done, task_date FROM tasks WHERE user_id=? AND done=0 ORDER BY created_at ASC",
+            (uid,)
+        )
+    else:  # all
+        cur = await conn.execute(
+            "SELECT task_text, done, task_date FROM tasks WHERE user_id=? ORDER BY created_at DESC",
+            (uid,)
+        )
+    rows = await cur.fetchall()
+    await cur.close(); await conn.close()
+
     if not rows:
-        await interaction.response.send_message("You’ve added no tasks today.", ephemeral=True); return
-    lines = [f"{'✅' if done else '⬜️'} {i}) {text}" for i, (text, done) in enumerate(rows, 1)]
-    await interaction.response.send_message("**Your tasks for today**\n" + "\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("No tasks match that view.", ephemeral=True)
+        return
+
+    def line(i, text, done, d):
+        return f"{'✅' if done else '⬜️'} {i}) [{d}] {text}" if scope_val != "today" else f"{'✅' if done else '⬜️'} {i}) {text}"
+
+    out = "\n".join(line(i, t, d, date) for i, (t, d, date) in enumerate(rows, 1))
+    title = "**Your tasks**" if scope_val != "today" else "**Your tasks for today**"
+    await interaction.response.send_message(f"{title}\n{out}", ephemeral=True)
 
 @bot.tree.command(name="cleartasks", description="Clear your tasks (today | open | all)")
 @app_commands.describe(scope="Which tasks to clear: today, open, or all")
@@ -385,17 +415,24 @@ async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choic
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if str(payload.emoji) != "✅":
         return
+
     conn = await get_db()
+    # Key off message_id ONLY so completion works on later days
     cur = await conn.execute(
-        "SELECT user_id, done FROM tasks WHERE message_id=? AND task_date=?",
-        (str(payload.message_id), today_iso())
+        "SELECT user_id, done FROM tasks WHERE message_id=?",
+        (str(payload.message_id),)
     )
-    row = await cur.fetchone(); await cur.close()
+    row = await cur.fetchone()
+    await cur.close()
+
     if not row:
-        await conn.close(); return
+        await conn.close()
+        return
+
     user_id, done = row
     if str(payload.user_id) != user_id:
-        await conn.close(); return  # only owner can complete
+        await conn.close()
+        return  # only owner can complete
 
     if not done:
         await conn.execute("UPDATE tasks SET done=1 WHERE message_id=?", (str(payload.message_id),))
@@ -406,18 +443,22 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     user = await bot.fetch_user(payload.user_id)
     await channel.send(f"{user.mention} {pick(LINES['task_tick'])}")
 
-    # celebration check
+    # celebration check (count done tasks for TODAY so daily streaks still work)
     conn2 = await get_db()
     cur2 = await conn2.execute(
         "SELECT COUNT(*) FROM tasks WHERE user_id=? AND task_date=? AND done=1",
         (str(payload.user_id), today_iso())
     )
-    (done_count,) = await cur2.fetchone(); await cur2.close()
+    (done_count,) = await cur2.fetchone()
+    await cur2.close()
+
     cur3 = await conn2.execute(
         "SELECT sent FROM celebrations WHERE user_id=? AND task_date=?",
         (str(payload.user_id), today_iso())
     )
-    row3 = await cur3.fetchone(); await cur3.close()
+    row3 = await cur3.fetchone()
+    await cur3.close()
+
     if done_count >= CELEBRATE_THRESHOLD and (not row3 or row3[0] == 0):
         img = pick_celebration_image()
         try:
