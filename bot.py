@@ -39,13 +39,13 @@ DB_PATH = os.getenv("DB_PATH", "/data/madsminder.db")
 TZ = os.getenv("TZ", "America/New_York")
 ANNOUNCE_CHANNEL_ID = getenv_int("ANNOUNCE_CHANNEL_ID", 0)   # optional
 
-THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)   # 6h before nudges for plain tasks
+THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)   # 6h before nudges
 THREAT_COOLDOWN_MINUTES   = getenv_int("THREAT_COOLDOWN_MINUTES", 180) # 3h between nudges
-MAX_THREATS_PER_TASK      = getenv_int("MAX_THREATS_PER_TASK", 5)      # cap per task
-GUILD_ID                  = getenv_int_or_none("GUILD_ID")              # instant guild sync if set
+MAX_THREATS_PER_TASK      = getenv_int("MAX_THREATS_PER_TASK", 5)
+GUILD_ID                  = getenv_int_or_none("GUILD_ID")
 
 CELEBRATE_DIR             = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")
-CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)        # celebrate at 6 tasks done in a day
+CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)  # celebrate at 6 tasks done in a day
 
 print(
     f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
@@ -78,7 +78,6 @@ LINES = {
         "Another mark in your favour.", "One more step in the right direction.",
         "Done without drama. Excellent.", "If only all victories were this tidy.",
     ],
-    # ominous, non-violent
     "threat": [
         "You’ve left something undone. It watches. I do as well.",
         "I could tidy this for you. My methods are… exacting.",
@@ -129,7 +128,6 @@ def pick(seq): return random.choice(seq)
 # -------------------- db helpers --------------------
 async def get_db():
     conn = await aiosqlite.connect(DB_PATH)
-    # base table
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,7 +141,6 @@ async def get_db():
             last_threat_at TEXT
         )
     """)
-    # migrations
     cols = {row[1] for row in await (await conn.execute("PRAGMA table_info(tasks)")).fetchall()}
     if "due_type" not in cols:
         await conn.execute("ALTER TABLE tasks ADD COLUMN due_type TEXT")
@@ -153,9 +150,9 @@ async def get_db():
         await conn.execute("ALTER TABLE tasks ADD COLUMN threat_count INTEGER DEFAULT 0")
     if "closed" not in cols:
         await conn.execute("ALTER TABLE tasks ADD COLUMN closed INTEGER DEFAULT 0")
+    if "completed_at" not in cols:
+        await conn.execute("ALTER TABLE tasks ADD COLUMN completed_at TEXT")
     await conn.commit()
-
-    # reminders
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS reminders(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,8 +165,6 @@ async def get_db():
         )
     """)
     await conn.commit()
-
-    # celebrations (avoid double posting per user/day)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS celebrations(
             user_id TEXT,
@@ -179,7 +174,6 @@ async def get_db():
         )
     """)
     await conn.commit()
-
     return conn
 
 def now_utc() -> dt.datetime:
@@ -260,8 +254,8 @@ async def addtask(interaction: discord.Interaction, text: str):
     conn = await get_db()
     await conn.execute("""
         INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at,
-                          last_threat_at, due_type, due_at, threat_count, closed)
-        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, NULL, NULL, 0, 0)
+                          last_threat_at, due_type, due_at, threat_count, closed, completed_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, NULL, NULL, 0, 0, NULL)
     """, (
         str(interaction.user.id), today_iso(), text,
         str(task_msg.id), str(task_msg.channel.id), now_utc().isoformat()
@@ -283,8 +277,8 @@ async def taskby(interaction: discord.Interaction, days: int, text: str):
     conn = await get_db()
     await conn.execute("""
         INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at,
-                          last_threat_at, due_type, due_at, threat_count, closed)
-        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'by_days', ?, 0, 0)
+                          last_threat_at, due_type, due_at, threat_count, closed, completed_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'by_days', ?, 0, 0, NULL)
     """, (
         str(interaction.user.id), today_iso(), text,
         str(task_msg.id), str(task_msg.channel.id), now_utc().isoformat(), due_at_utc.isoformat()
@@ -306,8 +300,8 @@ async def taskon(interaction: discord.Interaction, date: str, text: str):
     conn = await get_db()
     await conn.execute("""
         INSERT INTO tasks(user_id, task_date, task_text, done, message_id, channel_id, created_at,
-                          last_threat_at, due_type, due_at, threat_count, closed)
-        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'on_date', ?, 0, 0)
+                          last_threat_at, due_type, due_at, threat_count, closed, completed_at)
+        VALUES (?, ?, ?, 0, ?, ?, ?, NULL, 'on_date', ?, 0, 0, NULL)
     """, (
         str(interaction.user.id), today_iso(), text,
         str(task_msg.id), str(task_msg.channel.id), now_utc().isoformat(), due_at_utc.isoformat()
@@ -393,7 +387,7 @@ async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choic
         cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND task_date=?", (uid, today_iso()))
     elif scope_val == "open":
         cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=0", (uid,))
-    else:  # all
+    else:
         cur = await conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id=?", (uid,))
     (count_to_delete,) = await cur.fetchone(); await cur.close()
 
@@ -415,27 +409,19 @@ async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choic
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if str(payload.emoji) != "✅":
         return
-
     conn = await get_db()
-    # Key off message_id ONLY so completion works on later days
-    cur = await conn.execute(
-        "SELECT user_id, done FROM tasks WHERE message_id=?",
-        (str(payload.message_id),)
-    )
-    row = await cur.fetchone()
-    await cur.close()
-
+    cur = await conn.execute("SELECT user_id, done FROM tasks WHERE message_id=?", (str(payload.message_id),))
+    row = await cur.fetchone(); await cur.close()
     if not row:
-        await conn.close()
-        return
-
+        await conn.close(); return
     user_id, done = row
     if str(payload.user_id) != user_id:
-        await conn.close()
-        return  # only owner can complete
-
+        await conn.close(); return
     if not done:
-        await conn.execute("UPDATE tasks SET done=1 WHERE message_id=?", (str(payload.message_id),))
+        await conn.execute(
+            "UPDATE tasks SET done=1, completed_at=? WHERE message_id=?",
+            (now_utc().isoformat(), str(payload.message_id))
+        )
         await conn.commit()
     await conn.close()
 
@@ -443,22 +429,18 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     user = await bot.fetch_user(payload.user_id)
     await channel.send(f"{user.mention} {pick(LINES['task_tick'])}")
 
-    # celebration check (count done tasks for TODAY so daily streaks still work)
+    # celebration check: count tasks completed today
     conn2 = await get_db()
     cur2 = await conn2.execute(
-        "SELECT COUNT(*) FROM tasks WHERE user_id=? AND task_date=? AND done=1",
+        "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=1 AND DATE(completed_at)=?",
         (str(payload.user_id), today_iso())
     )
-    (done_count,) = await cur2.fetchone()
-    await cur2.close()
-
+    (done_count,) = await cur2.fetchone(); await cur2.close()
     cur3 = await conn2.execute(
         "SELECT sent FROM celebrations WHERE user_id=? AND task_date=?",
         (str(payload.user_id), today_iso())
     )
-    row3 = await cur3.fetchone()
-    await cur3.close()
-
+    row3 = await cur3.fetchone(); await cur3.close()
     if done_count >= CELEBRATE_THRESHOLD and (not row3 or row3[0] == 0):
         img = pick_celebration_image()
         try:
@@ -481,19 +463,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 
 # -------------------- jobs --------------------
 async def daily_prompt():
-    if not ANNOUNCE_CHANNEL_ID:
-        return
+    if not ANNOUNCE_CHANNEL_ID: return
     channel = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
     await channel.send(f"{pick(LINES['daily_prompt'])}\nUse `/addtask` to register a task.")
 
 async def threat_scan():
-    """
-    Every 10 minutes:
-      - Skip done or closed tasks.
-      - If due_at exists: threats start only after due_at. Else after GRACE.
-      - Enforce cooldown and MAX_THREATS_PER_TASK.
-      - If original message/channel is gone, mark task closed to stop future scans.
-    """
     conn = await get_db()
     cur = await conn.execute("""
         SELECT id, user_id, message_id, channel_id, created_at, last_threat_at,
@@ -502,38 +476,21 @@ async def threat_scan():
         WHERE done=0
     """)
     rows = await cur.fetchall(); await cur.close()
-
     now = now_utc()
     for (tid, user_id, message_id, channel_id, created_at, last_threat_at,
          due_type, due_at, threat_count, closed) in rows:
-
-        if closed:
-            continue
-
-        created_dt = parse_iso(created_at)
-        last_dt = parse_iso(last_threat_at)
-        due_dt = parse_iso(due_at)
-        if not created_dt:
-            continue
-
-        # max nudge cap
-        if (threat_count or 0) >= MAX_THREATS_PER_TASK:
-            continue
-
-        # allowed to threaten yet?
+        if closed: continue
+        created_dt = parse_iso(created_at); last_dt = parse_iso(last_threat_at); due_dt = parse_iso(due_at)
+        if not created_dt: continue
+        if (threat_count or 0) >= MAX_THREATS_PER_TASK: continue
         if due_dt is not None:
             ready = now >= due_dt
         else:
             age_min = (now - created_dt).total_seconds() / 60
             ready = age_min >= THREAT_GRACE_MINUTES
-        if not ready:
-            continue
-
-        # cooldown
+        if not ready: continue
         cooldown_ok = (last_dt is None) or ((now - last_dt).total_seconds() / 60 >= THREAT_COOLDOWN_MINUTES)
-        if not cooldown_ok:
-            continue
-
+        if not cooldown_ok: continue
         try:
             channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
             msg = await channel.fetch_message(int(message_id))
@@ -541,34 +498,20 @@ async def threat_scan():
             await conn.execute(
                 "UPDATE tasks SET last_threat_at=?, threat_count=COALESCE(threat_count,0)+1 WHERE id=?",
                 (now.isoformat(), tid)
-            )
-            await conn.commit()
+            ); await conn.commit()
         except Exception:
-            # message or channel is gone -> close task so it never nags again
-            await conn.execute(
-                "UPDATE tasks SET closed=1, last_threat_at=? WHERE id=?",
-                (now.isoformat(), tid)
-            )
+            await conn.execute("UPDATE tasks SET closed=1, last_threat_at=? WHERE id=?", (now.isoformat(), tid))
             await conn.commit()
-
     await conn.close()
 
 async def reminder_scan():
-    """
-    Every minute: DM users for reminders that are due.
-    Falls back to posting in the original channel if DM fails.
-    """
     conn = await get_db()
-    cur = await conn.execute(
-        "SELECT id, user_id, channel_id, text, remind_at FROM reminders WHERE sent=0"
-    )
+    cur = await conn.execute("SELECT id, user_id, channel_id, text, remind_at FROM reminders WHERE sent=0")
     rows = await cur.fetchall(); await cur.close()
-
     now = now_utc()
     for (rid, user_id, channel_id, text, remind_at) in rows:
         due = parse_iso(remind_at)
-        if not due or due > now:
-            continue
+        if not due or due > now: continue
         try:
             user = await bot.fetch_user(int(user_id))
             try:
@@ -577,12 +520,10 @@ async def reminder_scan():
                 try:
                     channel = bot.get_channel(int(channel_id)) or await bot.fetch_channel(int(channel_id))
                     await channel.send(f"<@{user_id}> Reminder: {text}")
-                except Exception:
-                    pass
+                except Exception: pass
         finally:
             await conn.execute("UPDATE reminders SET sent=1 WHERE id=?", (rid,))
             await conn.commit()
-
     await conn.close()
 
 # -------------------- entrypoint --------------------
