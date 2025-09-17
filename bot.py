@@ -39,7 +39,7 @@ DB_PATH = os.getenv("DB_PATH", "/data/madsminder.db")
 TZ = os.getenv("TZ", "America/New_York")
 ANNOUNCE_CHANNEL_ID = getenv_int("ANNOUNCE_CHANNEL_ID", 0)   # optional
 
-THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)   # 6h before nudges
+THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)    # 6h before nudges
 THREAT_COOLDOWN_MINUTES   = getenv_int("THREAT_COOLDOWN_MINUTES", 180) # 3h between nudges
 MAX_THREATS_PER_TASK      = getenv_int("MAX_THREATS_PER_TASK", 5)
 GUILD_ID                  = getenv_int_or_none("GUILD_ID")
@@ -47,11 +47,14 @@ GUILD_ID                  = getenv_int_or_none("GUILD_ID")
 CELEBRATE_DIR             = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")
 CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)  # celebrate at 6 tasks done in a day
 
+PEPTALKS_DIR              = os.getenv("PEPTALKS_DIR", "/app/peptalks")  # folder with .mp3 pep talks
+
 print(
     f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
     f"GRACE={THREAT_GRACE_MINUTES} COOLDOWN={THREAT_COOLDOWN_MINUTES} "
     f"GUILD_ID={GUILD_ID or 'None'} CELEBRATE_DIR={CELEBRATE_DIR} "
-    f"THRESH={CELEBRATE_THRESHOLD} MAX_THREATS={MAX_THREATS_PER_TASK}"
+    f"THRESH={CELEBRATE_THRESHOLD} MAX_THREATS={MAX_THREATS_PER_TASK} "
+    f"PEPTALKS_DIR={PEPTALKS_DIR}"
 )
 
 # -------------------- discord client --------------------
@@ -78,6 +81,7 @@ LINES = {
         "Another mark in your favour.", "One more step in the right direction.",
         "Done without drama. Excellent.", "If only all victories were this tidy.",
     ],
+    # ominous, non-violent
     "threat": [
         "You’ve left something undone. It watches. I do as well.",
         "I could tidy this for you. My methods are… exacting.",
@@ -99,6 +103,29 @@ LINES = {
         "One final bite, and the day is yours.",
         "You left the table before the last course. Rude.",
         "Do finish. It’s far more pleasant than being finished with.",
+    ],
+    # new: celebratory lines when posting the image
+    "celebrate": [
+        "Order restored. Enjoy the spoils.",
+        "Six clean cuts. I’m impressed—quietly.",
+        "Discipline looks good on you.",
+        "Efficiency is a refined taste. You have it.",
+        "You carved today to your liking. Elegant.",
+        "The day yielded. You insisted.",
+        "Consider me… satisfied.",
+        "That was precise. I notice precision.",
+        "You’ve earned something beautiful.",
+        "I prefer excellence. Thank you for providing it.",
+        "A day without loose ends. Civilised.",
+        "The list looks empty. How charming.",
+        "A perfect course—start to finish.",
+        "I appreciate a thorough appetite.",
+        "Graceful, relentless, effective.",
+        "No fuss. Just results.",
+        "If only everyone were so… capable.",
+        "You didn’t hesitate. Nor should you.",
+        "A fine performance. Take your bow.",
+        "Meticulous. I approve.",
     ],
     "daily_prompt": [
         "Morning. Add your tasks one by one with `/addtask`. Keep them sharp.",
@@ -124,6 +151,19 @@ LINES = {
     ],
 }
 def pick(seq): return random.choice(seq)
+
+# -------------------- file pickers --------------------
+def pick_celebration_image() -> Path | None:
+    p = Path(CELEBRATE_DIR)
+    if not p.exists(): return None
+    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}]
+    return random.choice(files) if files else None
+
+def pick_peptalk_mp3() -> Path | None:
+    p = Path(PEPTALKS_DIR)
+    if not p.exists(): return None
+    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".mp3"}]
+    return random.choice(files) if files else None
 
 # -------------------- db helpers --------------------
 async def get_db():
@@ -197,12 +237,6 @@ def end_of_day_utc(date_obj: dt.date, tz_str: str) -> dt.datetime:
     local_eod = dt.datetime(date_obj.year, date_obj.month, date_obj.day, 23, 59, 59, tzinfo=tz)
     return to_utc(local_eod)
 
-def pick_celebration_image() -> Path | None:
-    p = Path(CELEBRATE_DIR)
-    if not p.exists(): return None
-    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}]
-    return random.choice(files) if files else None
-
 # -------------------- command registration --------------------
 @bot.event
 async def setup_hook():
@@ -243,6 +277,7 @@ async def help_cmd(interaction: discord.Interaction):
         "• `/remindme hours:<N> text:<note>`\n"
         "• `/mytasks scope:(today|open|all)`\n"
         "• `/cleartasks scope:(today|open|all)`\n"
+        "• `/peptalk` (random MP3 pep talk)\n"
         "\nElegance over enthusiasm."
     )
     await interaction.response.send_message(text, ephemeral=True)
@@ -404,6 +439,18 @@ async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choic
 
     await interaction.response.send_message(f"Cleared **{count_to_delete}** task(s) ({scope_val}).", ephemeral=True)
 
+@bot.tree.command(name="peptalk", description="Post a random pep talk MP3")
+async def peptalk(interaction: discord.Interaction):
+    mp3 = pick_peptalk_mp3()
+    if not mp3:
+        await interaction.response.send_message("No pep talks found.", ephemeral=True)
+        return
+    await interaction.response.defer()
+    try:
+        await interaction.followup.send(file=discord.File(mp3))
+    except Exception:
+        await interaction.followup.send("Audio refused to cooperate. Try again.", ephemeral=True)
+
 # -------------------- reactions --------------------
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -429,7 +476,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     user = await bot.fetch_user(payload.user_id)
     await channel.send(f"{user.mention} {pick(LINES['task_tick'])}")
 
-    # celebration check: count tasks completed today
+    # celebration check: count tasks completed today (any task type)
     conn2 = await get_db()
     cur2 = await conn2.execute(
         "SELECT COUNT(*) FROM tasks WHERE user_id=? AND done=1 AND DATE(completed_at)=?",
@@ -443,15 +490,14 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     row3 = await cur3.fetchone(); await cur3.close()
     if done_count >= CELEBRATE_THRESHOLD and (not row3 or row3[0] == 0):
         img = pick_celebration_image()
+        say = pick(LINES["celebrate"])
         try:
             if img:
-                await channel.send(
-                    content=f"{user.mention} A spree of competence. Accept this… memento.",
-                    file=discord.File(img)
-                )
+                await channel.send(content=f"{user.mention} {say}", file=discord.File(img))
             else:
-                await channel.send(f"{user.mention} A spree of competence. Imagine confetti.")
+                await channel.send(f"{user.mention} {say}")
         except Exception:
+            # even if image fails, record celebration to avoid spamming
             pass
         await conn2.execute(
             """INSERT INTO celebrations(user_id, task_date, sent) VALUES(?, ?, 1)
