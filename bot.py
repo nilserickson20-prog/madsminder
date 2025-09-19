@@ -47,14 +47,15 @@ GUILD_ID                  = getenv_int_or_none("GUILD_ID")
 CELEBRATE_DIR             = os.getenv("CELEBRATE_DIR", "/app/celebrate_images")
 CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)  # celebrate at 6 tasks done in a day
 
-PEPTALKS_DIR              = os.getenv("PEPTALKS_DIR", "/app/peptalks")  # folder with .mp3 pep talks
+PEPTALKS_DIR              = os.getenv("PEPTALKS_DIR", "/app/peptalks")  # .mp3 pep talks
+STREAK_VIDEOS_DIR         = os.getenv("STREAK_VIDEOS_DIR", "/app/streak_videos")  # .mp4/.mov/.webm
 
 print(
     f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
     f"GRACE={THREAT_GRACE_MINUTES} COOLDOWN={THREAT_COOLDOWN_MINUTES} "
     f"GUILD_ID={GUILD_ID or 'None'} CELEBRATE_DIR={CELEBRATE_DIR} "
     f"THRESH={CELEBRATE_THRESHOLD} MAX_THREATS={MAX_THREATS_PER_TASK} "
-    f"PEPTALKS_DIR={PEPTALKS_DIR}"
+    f"PEPTALKS_DIR={PEPTALKS_DIR} STREAK_VIDEOS_DIR={STREAK_VIDEOS_DIR}"
 )
 
 # -------------------- discord client --------------------
@@ -104,65 +105,94 @@ LINES = {
         "You left the table before the last course. Rude.",
         "Do finish. It’s far more pleasant than being finished with.",
     ],
-    # new: celebratory lines when posting the image
+    # random celebratory line when posting the 6+ image
     "celebrate": [
-        "Order restored. Enjoy the spoils.",
-        "Six clean cuts. I’m impressed—quietly.",
-        "Discipline looks good on you.",
-        "Efficiency is a refined taste. You have it.",
-        "You carved today to your liking. Elegant.",
-        "The day yielded. You insisted.",
-        "Consider me… satisfied.",
-        "That was precise. I notice precision.",
-        "You’ve earned something beautiful.",
-        "I prefer excellence. Thank you for providing it.",
-        "A day without loose ends. Civilised.",
-        "The list looks empty. How charming.",
-        "A perfect course—start to finish.",
-        "I appreciate a thorough appetite.",
-        "Graceful, relentless, effective.",
-        "No fuss. Just results.",
-        "If only everyone were so… capable.",
-        "You didn’t hesitate. Nor should you.",
-        "A fine performance. Take your bow.",
-        "Meticulous. I approve.",
+        "Order restored. Enjoy the spoils.", "Six clean cuts. I’m impressed—quietly.",
+        "Discipline looks good on you.", "Efficiency is a refined taste. You have it.",
+        "You carved today to your liking. Elegant.", "The day yielded. You insisted.",
+        "Consider me… satisfied.", "That was precise. I notice precision.",
+        "You’ve earned something beautiful.", "I prefer excellence. Thank you for providing it.",
+        "A day without loose ends. Civilised.", "The list looks empty. How charming.",
+        "A perfect course—start to finish.", "I appreciate a thorough appetite.",
+        "Graceful, relentless, effective.", "No fuss. Just results.",
+        "If only everyone were so… capable.", "You didn’t hesitate. Nor should you.",
+        "A fine performance. Take your bow.", "Meticulous. I approve.",
     ],
-    "daily_prompt": [
-        "Morning. Add your tasks one by one with `/addtask`. Keep them sharp.",
-        "Today likes precision. Use `/addtask` to begin.",
-        "Select your priorities. One task at a time—quality over clutter.",
-        "Plan it now, or the day will plan itself for you. `/addtask`.",
-        "Three good cuts beat twelve dull ones. Start with `/addtask`.",
-        "If everything matters, nothing does. Declare your first task.",
-        "Your intentions, please. `/addtask` is listening.",
-        "Begin elegantly. One clear task will do.",
-        "Discipline starts with a single line. Add it.",
-        "A short list makes for a long life. `/addtask`.",
-        "Pick your battles—preferably ones you can win.",
-        "The canvas is blank. Limit your brushstrokes.",
-        "Write it before it escapes you.",
-        "We’re aiming for precision, not clutter. Proceed.",
-        "Ambiguity is laziness in disguise. Name the work.",
-        "A tidy list is a courteous future.",
-        "Make the first move. `/addtask`.",
-        "Quiet intentions make loud results.",
-        "Tasteful goals only, please.",
-        "Let’s keep today civilised.",
+    # streak sayings: when streak > 0
+    "streak_keep": [
+        "Routine is an art when practiced daily.",
+        "Elegance is repetition without boredom.",
+        "Discipline is appetite refined. Keep feeding it.",
+        "Consistency is the quietest form of power.",
+        "You’re cultivating taste. One day at a time.",
+        "A day unbroken. Another line in a clean pattern.",
+        "The best habits are invisible—like good tailoring.",
+        "Continue. Grace thrives on rhythm.",
+        "Civilisation is built by small, daily choices.",
+        "You arrive, and the day behaves.",
+        "Keep your promises to yourself. I’m watching.",
+        "Your restraint is… reassuring.",
+        "Patterns become identity. Choose carefully.",
+        "Today does not intimidate you. Good.",
+        "You are not at the mercy of mood. Impressive.",
+        "Precision loves routine; so do I.",
+        "Nothing extravagant—just excellent, again.",
+        "Momentum is a delicate broth. Don’t spill it.",
+        "You’ve acquired a taste for progress.",
+        "Let’s keep things exquisitely predictable.",
+    ],
+    # streak sayings: when streak == 0 (reset)
+    "streak_reset": [
+        "A lapse. Untidy. Let’s not make a habit of it.",
+        "You missed a step. I prefer symmetry.",
+        "The pattern broke. Reassemble yourself.",
+        "Neutral taste is forgettable. You are not.",
+        "Start again. Quietly. Thoroughly.",
+        "The day escaped you. Don’t let the next one.",
+        "Elegance faltered. Discipline did not. Retrieve it.",
+        "Precision is patient. Try again.",
+        "The absence was noticed. Correct the record.",
+        "We can forgive one day. Let’s not collect them.",
+        "The table is reset. Serve something better.",
+        "Stumbles are acceptable. Idle is not.",
+        "Momentum decays quickly. Reignite it.",
+        "The mirror prefers you focused.",
+        "Consider the cost of neglect. Then proceed.",
+        "You will be remembered for what you repeat. Choose anew.",
+        "Yesterday underwhelmed. Today needn’t.",
+        "You can do better. In fact, you will.",
+        "Let’s restore the formality of progress.",
+        "Begin again—without apology, with intent.",
     ],
 }
 def pick(seq): return random.choice(seq)
 
 # -------------------- file pickers --------------------
+def _list_files(dirpath: Path, exts: set[str]) -> list[Path]:
+    if not dirpath.exists():
+        return []
+    out = []
+    for p in dirpath.iterdir():
+        if p.is_file() and p.suffix.lower() in exts:
+            out.append(p)
+    return out
+
 def pick_celebration_image() -> Path | None:
-    p = Path(CELEBRATE_DIR)
-    if not p.exists(): return None
-    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif"}]
+    files = []
+    for loc in (Path(CELEBRATE_DIR), Path("/app/celebrate_images"), Path("./celebrate_images")):
+        files.extend(_list_files(loc, {".png", ".jpg", ".jpeg", ".gif"}))
     return random.choice(files) if files else None
 
 def pick_peptalk_mp3() -> Path | None:
-    p = Path(PEPTALKS_DIR)
-    if not p.exists(): return None
-    files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in {".mp3"}]
+    files = []
+    for loc in (Path(PEPTALKS_DIR), Path("/app/peptalks"), Path("./peptalks"), Path("/peptalks")):
+        files.extend(_list_files(loc, {".mp3"}))
+    return random.choice(files) if files else None
+
+def pick_streak_video() -> Path | None:
+    files = []
+    for loc in (Path(STREAK_VIDEOS_DIR), Path("/app/streak_videos"), Path("./streak_videos")):
+        files.extend(_list_files(loc, {".mp4", ".mov", ".webm"}))
     return random.choice(files) if files else None
 
 # -------------------- db helpers --------------------
@@ -211,6 +241,16 @@ async def get_db():
             task_date TEXT,
             sent INTEGER DEFAULT 0,
             PRIMARY KEY(user_id, task_date)
+        )
+    """)
+    await conn.commit()
+    # record of '7-day multiple' videos sent to avoid duplicates per day
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS streak_awards(
+            user_id TEXT,
+            award_date TEXT,     -- local date we evaluated (YYYY-MM-DD)
+            streak_len INTEGER,
+            PRIMARY KEY(user_id, award_date)
         )
     """)
     await conn.commit()
@@ -264,6 +304,8 @@ async def on_ready():
         scheduler.add_job(daily_prompt, CronTrigger(hour=9, minute=0, timezone=tz))
     scheduler.add_job(threat_scan,   IntervalTrigger(minutes=10, timezone=tz))
     scheduler.add_job(reminder_scan, IntervalTrigger(minutes=1,  timezone=tz))
+    # NEW: streak digest at 3:00 AM local time
+    scheduler.add_job(streak_digest_all, CronTrigger(hour=3, minute=0, timezone=tz))
     scheduler.start()
 
 # -------------------- slash commands --------------------
@@ -278,7 +320,7 @@ async def help_cmd(interaction: discord.Interaction):
         "• `/mytasks scope:(today|open|all)`\n"
         "• `/cleartasks scope:(today|open|all)`\n"
         "• `/peptalk` (random MP3 pep talk)\n"
-        "\nElegance over enthusiasm."
+        "\nAt 3:00 AM, you’ll receive your streak status."
     )
     await interaction.response.send_message(text, ephemeral=True)
 
@@ -443,7 +485,10 @@ async def cleartasks(interaction: discord.Interaction, scope: app_commands.Choic
 async def peptalk(interaction: discord.Interaction):
     mp3 = pick_peptalk_mp3()
     if not mp3:
-        await interaction.response.send_message("No pep talks found.", ephemeral=True)
+        await interaction.response.send_message(
+            f"No pep talks found. Expected in: {PEPTALKS_DIR}, /app/peptalks, ./peptalks, or /peptalks",
+            ephemeral=True
+        )
         return
     await interaction.response.defer()
     try:
@@ -497,7 +542,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             else:
                 await channel.send(f"{user.mention} {say}")
         except Exception:
-            # even if image fails, record celebration to avoid spamming
             pass
         await conn2.execute(
             """INSERT INTO celebrations(user_id, task_date, sent) VALUES(?, ?, 1)
@@ -570,6 +614,101 @@ async def reminder_scan():
         finally:
             await conn.execute("UPDATE reminders SET sent=1 WHERE id=?", (rid,))
             await conn.commit()
+    await conn.close()
+
+# -------------------- streak logic --------------------
+def local_date_today(tz_str: str) -> dt.date:
+    tz = ZoneInfo(tz_str)
+    return dt.datetime.now(tz).date()
+
+def local_date_yesterday(tz_str: str) -> dt.date:
+    return local_date_today(tz_str) - dt.timedelta(days=1)
+
+async def get_all_user_ids(conn) -> list[str]:
+    cur = await conn.execute("SELECT DISTINCT user_id FROM tasks")
+    rows = await cur.fetchall(); await cur.close()
+    return [r[0] for r in rows]
+
+async def completed_on_date(conn, user_id: str, day: dt.date) -> bool:
+    cur = await conn.execute(
+        "SELECT 1 FROM tasks WHERE user_id=? AND done=1 AND DATE(completed_at)=? LIMIT 1",
+        (user_id, day.isoformat())
+    )
+    row = await cur.fetchone(); await cur.close()
+    return bool(row)
+
+async def compute_streak(conn, user_id: str, end_day: dt.date) -> int:
+    """
+    Count consecutive days (backwards from end_day inclusive) with >=1 completion.
+    """
+    streak = 0
+    day = end_day
+    # cap lookback to 365 to avoid runaway loops
+    for _ in range(365):
+        ok = await completed_on_date(conn, user_id, day)
+        if not ok:
+            break
+        streak += 1
+        day = day - dt.timedelta(days=1)
+    return streak
+
+async def streak_digest_all():
+    """
+    At 3:00 AM local time:
+      - For every known user, compute streak ending at YESTERDAY (local).
+      - DM the user with their streak and a line (keep vs reset).
+      - If streak is a multiple of 7, post a random video (DM + optional announce).
+      - Record award in streak_awards to avoid duplicate sends for the same day.
+    """
+    local_yday = local_date_yesterday(TZ)
+    conn = await get_db()
+    users = await get_all_user_ids(conn)
+    for user_id in users:
+        streak = await compute_streak(conn, user_id, local_yday)
+        # Send DM
+        try:
+            user = await bot.fetch_user(int(user_id))
+            if streak > 0:
+                line = pick(LINES["streak_keep"])
+                await user.send(f"Streak: **{streak}** day(s). {line}")
+            else:
+                line = pick(LINES["streak_reset"])
+                await user.send(f"Streak: **0**. {line}")
+        except Exception:
+            pass
+
+        # Check 7-day multiple reward, avoid duplicate for this date
+        if streak > 0 and streak % 7 == 0:
+            cur = await conn.execute(
+                "SELECT 1 FROM streak_awards WHERE user_id=? AND award_date=?",
+                (user_id, local_yday.isoformat())
+            )
+            already = await cur.fetchone(); await cur.close()
+            if not already:
+                vid = pick_streak_video()
+                try:
+                    user = await bot.fetch_user(int(user_id))
+                    if vid:
+                        await user.send(content=f"Seven in a row. Sustained taste.", file=discord.File(vid))
+                    else:
+                        await user.send("Seven in a row. Sustained taste. (No video found.)")
+                except Exception:
+                    pass
+                # Optionally also announce in a channel
+                if ANNOUNCE_CHANNEL_ID:
+                    try:
+                        channel = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
+                        if vid:
+                            await channel.send(content=f"<@{user_id}> Seven days. Civilised.", file=discord.File(vid))
+                        else:
+                            await channel.send(f"<@{user_id}> Seven days. Civilised. (No video found.)")
+                    except Exception:
+                        pass
+                await conn.execute(
+                    "INSERT INTO streak_awards(user_id, award_date, streak_len) VALUES(?, ?, ?)",
+                    (user_id, local_yday.isoformat(), streak)
+                )
+                await conn.commit()
     await conn.close()
 
 # -------------------- entrypoint --------------------
