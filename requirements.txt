@@ -2,3 +2,4 @@ discord.py==2.4.0
 aiosqlite
 apscheduler
 tzdata
+openai>=1.40.0
