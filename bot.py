@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from zoneinfo import ZoneInfo
+from openai import OpenAI
 
 # -------------------- env helpers --------------------
 def getenv_int(name: str, default: int) -> int:
@@ -49,6 +50,10 @@ CELEBRATE_THRESHOLD       = getenv_int("CELEBRATE_THRESHOLD", 6)  # celebrate at
 
 PEPTALKS_DIR              = os.getenv("PEPTALKS_DIR", "/app/peptalks")  # .mp3 pep talks
 STREAK_VIDEOS_DIR         = os.getenv("STREAK_VIDEOS_DIR", "/app/streak_videos")  # .mp4/.mov/.webm
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 
 print(
     f"[startup] TZ={TZ} ANNOUNCE_CHANNEL_ID={ANNOUNCE_CHANNEL_ID} "
@@ -710,6 +715,47 @@ async def streak_digest_all():
                 )
                 await conn.commit()
     await conn.close()
+
+@bot.tree.command(name="askmads", description="Ask MadsMinder anything. He’ll answer… in his style.")
+async def askmads(interaction: discord.Interaction, question: str):
+    # basic guard
+    if openai_client is None:
+        await interaction.response.send_message(
+            "This feature isn’t configured. Ask the admin to set OPENAI_API_KEY.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=False)
+
+    # Persona prompt: emulate the cool, dry tone—without claiming to be the real person.
+    system_instructions = (
+        "You are 'MadsMinder', a laconic, sharp-witted productivity consigliere with a cool, dry Danish cadence. "
+        "You speak briefly, precisely, and with understated elegance. "
+        "Offer practical, grounded answers with a calm, slightly ominous charm. "
+        "Avoid explicit impersonation claims; you're an assistant with that vibe. "
+        "Keep replies under 180–220 words unless the user asks for detail."
+    )
+
+    try:
+        # OpenAI Responses API (simple, reliable)
+        resp = openai_client.responses.create(
+            model="gpt-4o",  # or "gpt-4o-mini" to save cost
+            input=[{
+                "role": "system",
+                "content": system_instructions
+            },{
+                "role": "user",
+                "content": question
+            }],
+            temperature=0.7,
+        )
+        text = resp.output_text.strip()
+    except Exception as e:
+        text = f"(MadsMinder pauses.) Something went wrong: `{e}`"
+
+    await interaction.followup.send(text)
+
 
 # -------------------- entrypoint --------------------
 if __name__ == "__main__":
