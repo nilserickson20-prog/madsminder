@@ -1,4 +1,4 @@
-import os, random, signal, datetime as dt, io, textwrap
+import os, random, signal, datetime as dt, io
 from pathlib import Path
 
 import aiosqlite
@@ -39,7 +39,7 @@ if not TOKEN:
 DB_PATH = os.getenv("DB_PATH", "/data/madsminder.db")
 TZ = os.getenv("TZ", "America/New_York")
 ANNOUNCE_CHANNEL_ID = getenv_int("ANNOUNCE_CHANNEL_ID", 0)   # optional
-JOURNAL_CHANNEL_ID = getenv_int("JOURNAL_CHANNEL_ID", ANNOUNCE_CHANNEL_ID)  # where prompts/board go
+JOURNAL_CHANNEL_ID = getenv_int("JOURNAL_CHANNEL_ID", ANNOUNCE_CHANNEL_ID)  # text channel for public diary posts
 
 THREAT_GRACE_MINUTES      = getenv_int("THREAT_GRACE_MINUTES", 360)    # 6h before nudges
 THREAT_COOLDOWN_MINUTES   = getenv_int("THREAT_COOLDOWN_MINUTES", 180) # 3h between nudges
@@ -169,6 +169,14 @@ LINES = {
         "Let’s restore the formality of progress.",
         "Begin again—without apology, with intent.",
     ],
+    # daily prompt lines for morning task nudge
+    "daily_prompt": [
+        "Three neat strokes will carve the day to your liking.",
+        "Choose three. Complete them. Enjoy the silence afterward.",
+        "Precision first, ambition second. List three.",
+        "Make a short list and a long stride.",
+        "You know the drill. Tasteful efficiency only.",
+    ],
 }
 def pick(seq): return random.choice(seq)
 
@@ -184,7 +192,7 @@ def _list_files(dirpath: Path, exts: set[str]) -> list[Path]:
 
 def pick_celebration_image() -> Path | None:
     files = []
-    for loc in (Path(CELERATE_DIR) if False else Path(CELEBRATE_DIR), Path("/app/celebrate_images"), Path("./celebrate_images")):
+    for loc in (Path(CELEBRATE_DIR), Path("/app/celebrate_images"), Path("./celebrate_images")):
         files.extend(_list_files(loc, {".png", ".jpg", ".jpeg", ".gif"}))
     return random.choice(files) if files else None
 
@@ -268,7 +276,7 @@ async def get_db():
             local_date TEXT,    -- YYYY-MM-DD in TZ
             is_private INTEGER DEFAULT 0,
             message_id TEXT,    -- if public, the board message id
-            channel_id TEXT     -- if public, the board channel id
+            channel_id TEXT     -- if public, the board channel id (thread or channel)
         )
     """)
     await conn.commit()
@@ -341,11 +349,12 @@ class JournalModal(discord.ui.Modal, title="Today’s Journal"):
         max_length=4000,
         placeholder="What did you notice, learn, or feel today?"
     )
-    def __init__(self, user_id: int, journal_channel_id: int, is_private: bool):
+    def __init__(self, user_id: int, is_private: bool, target_channel_id: int | None):
         super().__init__()
         self._user_id = user_id
-        self._journal_channel_id = journal_channel_id
         self._is_private = is_private
+        # Prefer the configured board text channel; fall back to invoking location
+        self._target_channel_id = target_channel_id  # fallback only
 
     async def on_submit(self, interaction: discord.Interaction):
         conn = await get_db()
@@ -353,31 +362,58 @@ class JournalModal(discord.ui.Modal, title="Today’s Journal"):
         local_day = dt.datetime.now(ZoneInfo(TZ)).date().isoformat()
 
         post_id, post_channel = None, None
-        if not self._is_private and JOURNAL_CHANNEL_ID:
-            board = interaction.client.get_channel(JOURNAL_CHANNEL_ID) or await interaction.client.fetch_channel(JOURNAL_CHANNEL_ID)
-            msg = await board.send(f"**Journal — {interaction.user.display_name} — {local_day}**\n{self.entry.value}")
-            post_id, post_channel = str(msg.id), str(board.id)
+        if not self._is_private:
+            dest = None
+            try:
+                # 1) Always try the configured board (text) channel
+                if JOURNAL_CHANNEL_ID:
+                    dest = interaction.client.get_channel(JOURNAL_CHANNEL_ID) or await interaction.client.fetch_channel(JOURNAL_CHANNEL_ID)
+                # 2) Fallback to where the command/button was used
+                if dest is None and self._target_channel_id:
+                    dest = interaction.client.get_channel(self._target_channel_id) or await interaction.client.fetch_channel(self._target_channel_id)
+
+                if isinstance(dest, (discord.TextChannel, discord.Thread, discord.VoiceChannel, discord.StageChannel)):
+                    msg = await dest.send(f"**Journal — {interaction.user.display_name} — {local_day}**\n{self.entry.value}")
+                    post_id, post_channel = str(msg.id), str(dest.id)
+                else:
+                    # Last resort: DM the user so they still see confirmation
+                    try:
+                        dm = await interaction.user.create_dm()
+                        await dm.send(f"(Journaling destination unavailable.)\n**Journal — {local_day}**\n{self.entry.value}")
+                    except Exception:
+                        pass
+            except Exception:
+                # Still save; just no public post
+                pass
 
         await conn.execute("""
             INSERT INTO journals(user_id, content, created_at, local_date, is_private, message_id, channel_id)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (str(self._user_id), self.entry.value, now.isoformat(), local_day, 1 if self._is_private else 0, post_id, post_channel))
+        """, (
+            str(self._user_id), self.entry.value, now.isoformat(), local_day,
+            1 if self._is_private else 0, post_id, post_channel
+        ))
         await conn.commit(); await conn.close()
 
         await interaction.response.send_message("Saved.", ephemeral=True)
 
 class JournalPromptView(discord.ui.View):
+    """
+    Public entries go to the configured board text channel if set;
+    otherwise they fall back to the channel/thread where the user clicked.
+    """
     def __init__(self, timeout: float | None = 3600):
         super().__init__(timeout=timeout)
 
     @discord.ui.button(label="Write (Public)", style=discord.ButtonStyle.primary)
     async def write_public(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = JournalModal(user_id=interaction.user.id, journal_channel_id=JOURNAL_CHANNEL_ID, is_private=False)
+        target_channel_id = interaction.channel_id  # fallback only; board channel takes precedence in the modal
+        modal = JournalModal(user_id=interaction.user.id, is_private=False, target_channel_id=target_channel_id)
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Write (Private)", style=discord.ButtonStyle.secondary)
     async def write_private(self, interaction: discord.Interaction, button: discord.ui.Button):
-        modal = JournalModal(user_id=interaction.user.id, journal_channel_id=JOURNAL_CHANNEL_ID, is_private=True)
+        modal = JournalModal(user_id=interaction.user.id, is_private=True, target_channel_id=None)
         await interaction.response.send_modal(modal)
 
 # -------------------- slash commands --------------------
@@ -410,7 +446,10 @@ async def help_cmd(interaction: discord.Interaction):
 )
 async def writediary(interaction: discord.Interaction, privacy: app_commands.Choice[str] = None):
     is_private = (privacy and privacy.value == "private")
-    await interaction.response.send_modal(JournalModal(user_id=interaction.user.id, journal_channel_id=JOURNAL_CHANNEL_ID, is_private=is_private))
+    target_channel_id = None if is_private else interaction.channel_id  # fallback only; board wins
+    await interaction.response.send_modal(
+        JournalModal(user_id=interaction.user.id, is_private=is_private, target_channel_id=target_channel_id)
+    )
 
 @bot.tree.command(name="readdiary", description="Read your journal entries")
 @app_commands.describe(scope="How many to show: last5, last30, or all")
@@ -465,7 +504,6 @@ async def finddiary(interaction: discord.Interaction, query: str, limit: int = 1
     uid = str(interaction.user.id)
 
     conn = await get_db()
-    # Simple LIKE search; for advanced FTS you can add an FTS5 virtual table later
     cur = await conn.execute(
         "SELECT local_date, content, is_private FROM journals WHERE user_id=? AND content LIKE ? ORDER BY datetime(created_at) DESC LIMIT ?",
         (uid, f"%{q}%", limit)
@@ -514,15 +552,13 @@ async def exportdiary(interaction: discord.Interaction, scope: app_commands.Choi
     if not rows:
         await interaction.response.send_message("No entries to export.", ephemeral=True); return
 
-    buff = io.StringIO()
+    out_lines = []
     for (d, c, priv) in rows:
         lock = " [PRIVATE]" if priv else ""
-        buff.write(f"{d}{lock}\n")
-        buff.write(c)
-        buff.write("\n\n" + ("-"*60) + "\n\n")
+        out_lines.append(f"{d}{lock}\n{c}\n\n" + ("-"*60) + "\n")
+    data = "".join(out_lines).encode("utf-8")
 
-    b = io.BytesIO(buff.getvalue().encode("utf-8"))
-    b.seek(0)
+    b = io.BytesIO(data); b.seek(0)
     filename = f"journal_{interaction.user.id}_{scope_val}.txt"
     await interaction.response.send_message(
         content="Your export is ready.",
@@ -766,9 +802,8 @@ async def daily_prompt():
 async def journal_daily_prompt():
     if not JOURNAL_CHANNEL_ID:
         return
-    channel = bot.get_channel(JOURNAL_CHANNEL_ID) or await bot.fetch_channel(JOURNAL_CHANNEL_ID)
-    view = JournalPromptView()
-    prompt_lines = [
+    parent = bot.get_channel(JOURNAL_CHANNEL_ID) or await bot.fetch_channel(JOURNAL_CHANNEL_ID)
+    prompt_texts = [
         "Three minutes. One page. Make it count.",
         "Write with restraint; reveal with honesty.",
         "Record what mattered—not everything that happened.",
@@ -780,10 +815,9 @@ async def journal_daily_prompt():
         "Civilise the day with language.",
         "Say less, mean more."
     ]
-    await channel.send(
-        f"**Journal prompt — {dt.date.today().isoformat()}**\n{random.choice(prompt_lines)}",
-        view=view
-    )
+    today = dt.date.today().isoformat()
+    line = random.choice(prompt_texts)
+    await parent.send(f"**Journal prompt — {today}**\n{line}", view=JournalPromptView())
 
 async def threat_scan():
     conn = await get_db()
@@ -866,6 +900,9 @@ async def completed_on_date(conn, user_id: str, day: dt.date) -> bool:
     return bool(row)
 
 async def compute_streak(conn, user_id: str, end_day: dt.date) -> int:
+    """
+    Count consecutive days (backwards from end_day inclusive) with >=1 completion.
+    """
     streak = 0
     day = end_day
     for _ in range(365):
@@ -877,11 +914,19 @@ async def compute_streak(conn, user_id: str, end_day: dt.date) -> int:
     return streak
 
 async def streak_digest_all():
+    """
+    At 3:00 AM local time:
+      - For every known user, compute streak ending at YESTERDAY (local).
+      - DM the user with their streak and a line (keep vs reset).
+      - If streak is a multiple of 7, post a random video (DM + optional announce).
+      - Record award in streak_awards to avoid duplicate sends for the same day.
+    """
     local_yday = local_date_yesterday(TZ)
     conn = await get_db()
     users = await get_all_user_ids(conn)
     for user_id in users:
         streak = await compute_streak(conn, user_id, local_yday)
+        # Send DM
         try:
             user = await bot.fetch_user(int(user_id))
             if streak > 0:
@@ -893,6 +938,7 @@ async def streak_digest_all():
         except Exception:
             pass
 
+        # Check 7-day multiple reward, avoid duplicate for this date
         if streak > 0 and streak % 7 == 0:
             cur = await conn.execute(
                 "SELECT 1 FROM streak_awards WHERE user_id=? AND award_date=?",
@@ -909,6 +955,7 @@ async def streak_digest_all():
                         await user.send("Seven in a row. Sustained taste. (No video found.)")
                 except Exception:
                     pass
+                # Optionally also announce in a channel
                 if ANNOUNCE_CHANNEL_ID:
                     try:
                         channel = bot.get_channel(ANNOUNCE_CHANNEL_ID) or await bot.fetch_channel(ANNOUNCE_CHANNEL_ID)
@@ -928,6 +975,7 @@ async def streak_digest_all():
 # -------------------- askmads --------------------
 @bot.tree.command(name="askmads", description="Ask MadsMinder anything. He’ll answer… in his style.")
 async def askmads(interaction: discord.Interaction, question: str):
+    # basic guard
     if openai_client is None:
         await interaction.response.send_message(
             "This feature isn’t configured. Ask the admin to set OPENAI_API_KEY.",
@@ -936,6 +984,8 @@ async def askmads(interaction: discord.Interaction, question: str):
         return
 
     await interaction.response.defer(thinking=True, ephemeral=False)
+
+    # Persona prompt: emulate the cool, dry tone—without claiming to be the real person.
     system_instructions = (
         "You are 'MadsMinder', a laconic, sharp-witted productivity consigliere with a cool, dry Danish cadence. "
         "You speak briefly, precisely, and with understated elegance. "
@@ -943,19 +993,22 @@ async def askmads(interaction: discord.Interaction, question: str):
         "Avoid explicit impersonation claims; you're an assistant with that vibe. "
         "Keep replies under 180–220 words unless the user asks for detail."
     )
+
     try:
         resp = openai_client.responses.create(
             model="gpt-4o",
-            input=[{"role":"system","content":system_instructions},
-                   {"role":"user","content":question}],
+            input=[{"role": "system", "content": system_instructions},
+                   {"role": "user", "content": question}],
             temperature=0.7,
         )
         text = resp.output_text.strip()
     except Exception as e:
         text = f"(MadsMinder pauses.) Something went wrong: `{e}`"
+
     await interaction.followup.send(text)
 
 # -------------------- entrypoint --------------------
 if __name__ == "__main__":
     print("[startup] starting discord client…")
     bot.run(TOKEN, log_handler=None)
+
